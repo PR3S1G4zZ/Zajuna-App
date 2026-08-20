@@ -203,7 +203,11 @@ func (w *CaptureChecklistWorker) Execute(ctx context.Context, job jobs.Job, repo
 		} else {
 			cookies := make([]capture.BrowserCookie, 0)
 			for _, cookie := range session.CookiesForURL(target.URL) {
-				cookies = append(cookies, capture.BrowserCookie{Name: cookie.Name, Value: cookie.Value, URL: target.URL})
+				converted, convErr := capture.BrowserCookieForTarget(cookie, parsedTarget)
+				if convErr != nil {
+					continue
+				}
+				cookies = append(cookies, converted)
 			}
 			if len(cookies) == 0 {
 				failed++
@@ -216,6 +220,8 @@ func (w *CaptureChecklistWorker) Execute(ctx context.Context, job jobs.Job, repo
 			failed++
 			if errors.Is(captureErr, capture.ErrLoginPage) {
 				failures = append(failures, target.ItemCode+": sesión de Zajuna expirada o página de login")
+			} else if errors.Is(captureErr, capture.ErrChallengePage) {
+				failures = append(failures, target.ItemCode+": Zajuna pidió CAPTCHA o MFA")
 			} else {
 				failures = append(failures, target.ItemCode+": "+captureErr.Error())
 			}

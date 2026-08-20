@@ -56,17 +56,25 @@ La contraseña se escribe exclusivamente en Credential Manager (Windows),
 Keychain (macOS) o Secret Service (Linux). Cookies y tokens permanecen en
 memoria; URLs y eventos pasan por redacción antes de persistirse.
 
+Los backups ZIP incluyen snapshot SQLite, hashes SHA256 y `schemaVersion`. El
+restore valida `PRAGMA integrity_check` y el schema en staging; si `Open`
+falla tras el swap, se restaura la base anterior.
+
 ### Workers y Chromium
 
 Los workers registrados incluyen sync de fichas, conexión, descubrimiento de
 mapas, captura HTML/browser/checklist y exportación de reportes. El runtime de
-jobs persiste estado, eventos, reintentos y progreso. Playwright Go usa el
+jobs persiste estado, eventos, reintentos y progreso. Las transiciones son
+CAS en SQLite: un worker por job y, al arrancar, los `running` huérfanos
+pasan a `retrying` (o `failed` si no quedan intentos). Playwright Go usa el
 runtime instalado bajo `core/bin/playwright`; el empaquetado copia esa carpeta
 junto al core en `resources/core/playwright`.
 
 Las capturas de producción permiten únicamente el origen Zajuna configurado,
-bloquean IPs privadas/loopback, comprueban redirects y redaccionan metadata.
-Los helpers de pruebas pueden usar servidores locales controlados.
+bloquean IPs privadas/loopback, comprueban cookies de sesión contra ese
+origen, validan la URL final antes del screenshot y redaccionan metadata.
+CAPTCHA/MFA abortan la captura. Los helpers de pruebas pueden usar servidores
+locales controlados.
 
 ## Flujo de ejecución
 
@@ -94,8 +102,8 @@ generan para x64 y ARM64, pero el instalador debe probarse nativamente.
 
 ## Riesgos aún abiertos
 
-- Firma digital y notarización.
-- Smoke nativo de DMG/AppImage.
-- Recuperación transaccional de jobs y restore de SQLite.
-- Prueba manual WCAG con lector de pantalla.
-- Validación autenticada por curso y manejo de CAPTCHA/MFA.
+- Firma digital y notarización (MDL-29).
+- Smoke nativo de DMG/AppImage y ciclo instalar/actualizar/desinstalar (MDL-29).
+- Prueba manual WCAG con lector de pantalla (MDL-32).
+- E2E autenticado con cuenta de prueba real (MDL-33).
+- Gate de release con matriz y acta (MDL-34).

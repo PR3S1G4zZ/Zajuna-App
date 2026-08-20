@@ -99,5 +99,5 @@ func (w *SyncFichasWorker) Execute(ctx context.Context, job jobs.Job, reporter j
 }
 
 func retryableZajunaError(err error) bool {
-	return !errors.Is(err, zajuna.ErrAuthentication) && !errors.Is(err, zajuna.ErrSessionExpired)
+	return !errors.Is(err, zajuna.ErrAuthentication) && !errors.Is(err, zajuna.ErrSessionExpired) && !errors.Is(err, zajuna.ErrChallengeRequired)
 }

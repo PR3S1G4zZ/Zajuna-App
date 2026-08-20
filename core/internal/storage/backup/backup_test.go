@@ -115,6 +115,144 @@ func TestStageAndApplyRestoreBeforeOpeningDatabase(t *testing.T) {
 	if err != nil || marker != "before" {
 		t.Fatalf("database was not restored: %q (%v)", marker, err)
 	}
+	if err := CommitApplied(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "zajuna.db.restore-old")); !os.IsNotExist(err) {
+		t.Fatal("safety copy should be removed after a successful restore")
+	}
+}
+
+func TestStageRestoreRejectsCorruptDatabaseWithoutTouchingLiveFiles(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := sqlite.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.SetAppSetting(context.Background(), "restore-marker", "live"); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(dataDir, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "backups"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := filepath.Join(dataDir, "backups", "zajuna-backup-corrupt.zip")
+	writeTestArchive(t, corrupt, map[string][]byte{
+		"database.sqlite": []byte("this is not sqlite"),
+		"manifest.json":   []byte(`{"formatVersion":"1","files":["database.sqlite"],"secrets":"none"}` + "\n"),
+	})
+	if _, err := manager.StageRestore(context.Background(), filepath.Base(corrupt)); err == nil {
+		t.Fatal("expected corrupt backup to be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, ".restore-pending")); !os.IsNotExist(err) {
+		t.Fatal("corrupt restore must not leave a pending folder")
+	}
+	marker, err := store.GetAppSetting(context.Background(), "restore-marker")
+	if err != nil || marker != "live" {
+		t.Fatalf("live database was modified: %q (%v)", marker, err)
+	}
+}
+
+func TestStageRestoreRejectsHashMismatch(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := sqlite.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager, err := NewManager(dataDir, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	tampered := filepath.Join(dataDir, "backups", "zajuna-backup-tampered.zip")
+	writeTestArchive(t, tampered, map[string][]byte{
+		"database.sqlite": []byte("tampered-db"),
+		"manifest.json":   []byte(`{"formatVersion":"1","files":["database.sqlite"],"hashes":[{"name":"database.sqlite","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"secrets":"none"}` + "\n"),
+	})
+	if _, err := manager.StageRestore(context.Background(), filepath.Base(tampered)); err == nil {
+		t.Fatal("expected hash mismatch to be rejected")
+	}
+}
+
+func TestApplyPendingRollsBackWhenRestoredDatabaseCannotOpen(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := sqlite.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAppSetting(context.Background(), "restore-marker", "before"); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(dataDir, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := manager.Create(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAppSetting(context.Background(), "restore-marker", "after"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.StageRestore(context.Background(), filepath.Base(record.Path)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := ApplyPending(dataDir)
+	if err != nil || !applied {
+		t.Fatalf("restore was not applied: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "zajuna.db"), []byte("broken-after-swap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlite.Open(dataDir); err == nil {
+		t.Fatal("expected swapped garbage database to fail open")
+	}
+	if err := RollbackApplied(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := sqlite.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	marker, err := restored.GetAppSetting(context.Background(), "restore-marker")
+	if err != nil || marker != "after" {
+		t.Fatalf("rollback did not restore the previous database: %q (%v)", marker, err)
+	}
+}
+
+func writeTestArchive(t *testing.T, path string, files map[string][]byte) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := zip.NewWriter(file)
+	for name, contents := range files {
+		entry, err := archive.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write(contents); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestDeleteBackupRejectsTraversal(t *testing.T) {
@@ -129,7 +267,12 @@ func TestDeleteBackupRejectsTraversal(t *testing.T) {
 
 func TestCleanupKeepsNewestAndOnlyRemovesOldArchives(t *testing.T) {
 	dataDir := t.TempDir()
-	manager, err := NewManager(dataDir, &fakeSnapshotter{})
+	store, err := sqlite.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager, err := NewManager(dataDir, store)
 	if err != nil {
 		t.Fatal(err)
 	}

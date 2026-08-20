@@ -1,6 +1,7 @@
 # Roadmap vigente de Zajuna App
 
 El documento completo de migración está en [`desktop-migration.md`](desktop-migration.md).
+El cierre de la jornada 2026-08-20 está en [`hardening-2026-08-20.md`](hardening-2026-08-20.md).
 Este roadmap solo muestra el estado de trabajo y las tareas que faltan.
 
 ## Estado actual
@@ -8,14 +9,14 @@ Este roadmap solo muestra el estado de trabajo y las tareas que faltan.
 | Área | Estado | Evidencia |
 |---|---|---|
 | Launcher Electron + core Go | Implementado | Launcher silencioso, endpoint dinámico, instancia única, recuperación y navegador predeterminado. |
-| React embebido | Implementado | Vite → `go:embed`, fallback SPA y API same-origin. |
-| SQLite y secretos | Implementado con hardening pendiente | Schema v12, keyring y backups locales. |
-| Jobs y scheduler | Funcional, hardening P1 pendiente | Polling, eventos, cancelación, reintentos y schedules. |
+| React embebido | Implementado | Vite → `go:embed`, PostCSS local, fallback SPA y API same-origin. |
+| SQLite y secretos | Implementado | Schema v12, keyring, backups con hash/`integrity_check` y rollback si el restore no abre. |
+| Jobs y scheduler | Implementado | CAS, un worker por job, recuperación de huérfanos al arrancar, eventos y schedules. |
 | Checklist/evidencias/reportes | Implementado | 62 ítems, detalle, galería, capturas y PDF/HTML. |
 | Configuración/diagnóstico/notificaciones | Implementado | APIs locales y vistas funcionales. |
 | Fidelidad visual y accesibilidad automatizada | Implementado | Sistema de diseño, motion, responsive y smoke de tres viewports. |
-| Seguridad OWASP | Hardening principal implementado | Capability, Host/Origin, anti-SSRF, redacción y symlink guard. |
-| Instalador Windows | Construido y probado | NSIS x64 con core + Chromium; sin firma digital. |
+| Seguridad OWASP | Hardening principal implementado | Capability, Host/Origin, anti-SSRF, cookies de captura acotadas, redacción y symlink guard. |
+| Instalador Windows | Construido y probado | NSIS x64 con core + Chromium; sin firma digital. Guía de descargas sin bypass de SmartScreen. |
 | macOS/Linux | Cross-build preparado | Falta ejecutar instalador y smoke en runners nativos. |
 
 ## Fases cerradas
@@ -50,23 +51,27 @@ El build sincroniza React dentro del core, genera seis targets Go, instala
 Chromium en el runner nativo, hace staging por plataforma y produce metadata
 SHA256/SBOM. El smoke empaquetado verifica `/api/health`.
 
+### Fase 6 — Hardening M0/M1 (2026-08-20)
+
+Se cerraron en código los bloqueadores de build/pruebas, las transiciones de
+jobs, el restore seguro de SQLite y el aborto de CAPTCHA/MFA. Queda M2:
+firma nativa, WCAG manual y gate de release. Ver Linear MDL-25.
+
 ## Trabajo restante priorizado
 
 ### P0 — Antes de entregar una versión comercial
 
-1. Firmar el instalador y ejecutables con certificados del cliente.
-2. Crear y probar DMG macOS y AppImage Linux en máquinas nativas.
+1. Firmar el instalador y ejecutables con certificados del cliente (MDL-29).
+2. Crear y probar DMG macOS y AppImage Linux en máquinas nativas (MDL-29).
 3. Probar instalación limpia, actualización, desinstalación y ausencia de
-   procesos huérfanos.
-4. Ejecutar flujo autenticado con cuenta de prueba en Windows.
+   procesos huérfanos (MDL-29).
+4. Ejecutar flujo autenticado con cuenta de prueba en Windows (MDL-33, E2E vivo).
 
 ### P1 — Antes de beta amplia
 
-1. Hacer transiciones CAS de jobs y recuperación persistida tras reinicio.
-2. Validar integridad/schema del backup en staging y rollback automático.
-3. Ejecutar pruebas manuales WCAG: teclado, zoom 200 %, NVDA y VoiceOver.
-4. Validar CAPTCHA/MFA, sesión vencida, selectores y reglas por curso real.
-5. Repetir revisión OWASP después de esos cambios.
+1. Ejecutar pruebas manuales WCAG: teclado, zoom 200 %, NVDA y VoiceOver (MDL-32).
+2. Registrar selectores y reglas por curso real en el E2E autenticado (MDL-33).
+3. Repetir revisión OWASP y el gate de integración (MDL-34).
 
 ### P2 — Evolución posterior
 

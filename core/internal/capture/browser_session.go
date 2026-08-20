@@ -83,6 +83,11 @@ func (r Runtime) OpenBrowserSession(ctx context.Context, credentials BrowserCred
 		session.Close()
 		return nil, blockedErr
 	}
+	loginBody, _ := page.Locator("body").InnerText()
+	if isChallengePage(page.URL(), pageTitle(page), loginBody) {
+		session.Close()
+		return nil, ErrChallengePage
+	}
 	loginForm := learnerLoginForm(page)
 	if err := selectDocumentType(loginForm, credentials.DocumentType); err != nil {
 		session.Close()
@@ -110,6 +115,10 @@ func (r Runtime) OpenBrowserSession(ctx context.Context, credentials BrowserCred
 		return nil, blockedErr
 	}
 	body, _ := page.Locator("body").InnerText()
+	if isChallengePage(page.URL(), pageTitle(page), body) {
+		session.Close()
+		return nil, ErrChallengePage
+	}
 	if isZajunaLoginPage(page.URL(), pageTitle(page), body) {
 		session.Close()
 		return nil, errors.New("la sesión de Chromium no quedó autenticada en Zajuna")
@@ -122,8 +131,11 @@ func (s *BrowserSession) CaptureURLWithMetadataAndOptions(ctx context.Context, t
 		return CaptureResult{}, errors.New("la sesión Chromium no está disponible")
 	}
 	parsed, err := url.Parse(targetURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+	if err != nil || parsed.Host == "" {
 		return CaptureResult{}, errors.New("la URL de captura debe ser http o https")
+	}
+	if err := ValidateCaptureNavigationURL(targetURL, parsed); err != nil {
+		return CaptureResult{}, err
 	}
 	if outputPath == "" {
 		return CaptureResult{}, errors.New("la ruta de salida de captura es obligatoria")
@@ -280,4 +292,27 @@ func isZajunaLoginPage(rawURL, title, body string) bool {
 	return strings.Contains(lowerBody, "número de documento") &&
 		strings.Contains(lowerBody, "contraseña") &&
 		strings.Contains(lowerBody, "iniciar sesión")
+}
+
+func isChallengePage(rawURL, title, body string) bool {
+	content := strings.ToLower(rawURL + "\n" + title + "\n" + body)
+	markers := []string{
+		"g-recaptcha",
+		"h-captcha",
+		"hcaptcha",
+		"recaptcha",
+		"captcha",
+		"autenticación de dos factores",
+		"autenticacion de dos factores",
+		"two-factor",
+		"two factor",
+		"código de verificación",
+		"codigo de verificacion",
+	}
+	for _, marker := range markers {
+		if strings.Contains(content, marker) {
+			return true
+		}
+	}
+	return false
 }

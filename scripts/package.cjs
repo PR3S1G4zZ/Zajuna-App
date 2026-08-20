@@ -2,6 +2,7 @@ const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { writeMetadata } = require('./release-metadata.cjs');
+const { writeDownloadsPage } = require('./prepare-downloads.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 const rawArgs = process.argv.slice(2);
@@ -103,3 +104,4 @@ if (result.error) {
 if (result.status !== 0) process.exit(result.status ?? 1);
 
 writeMetadata();
+writeDownloadsPage();

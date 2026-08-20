@@ -126,6 +126,9 @@ func (w *CaptureBrowserWorker) Execute(ctx context.Context, job jobs.Job, report
 		}
 		session, err := w.authClient.Login(ctx, zajuna.Credentials{DocumentType: input.DocumentType, Document: input.Username, Password: password})
 		if err != nil {
+			if errors.Is(err, zajuna.ErrChallengeRequired) {
+				return jobs.Result{ErrorCode: "zajuna_challenge_required", ErrorMessage: "Zajuna pidió CAPTCHA o MFA; la captura no se automatiza"}
+			}
 			return jobs.Result{Retryable: retryableZajunaError(err), ErrorCode: "zajuna_login_failed", ErrorMessage: fmt.Sprintf("no se pudo iniciar sesión para la captura: %v", err)}
 		}
 		base, baseErr := url.Parse(session.BaseURL)
@@ -133,7 +136,11 @@ func (w *CaptureBrowserWorker) Execute(ctx context.Context, job jobs.Job, report
 			return jobs.Result{ErrorCode: "invalid_authenticated_target", ErrorMessage: "la captura autenticada solo permite URLs del mismo origen de Zajuna"}
 		}
 		for _, cookie := range session.CookiesForURL(input.URL) {
-			browserCookies = append(browserCookies, capture.BrowserCookie{Name: cookie.Name, Value: cookie.Value, URL: input.URL})
+			converted, convErr := capture.BrowserCookieForTarget(cookie, parsedTarget)
+			if convErr != nil {
+				continue
+			}
+			browserCookies = append(browserCookies, converted)
 		}
 		if len(browserCookies) == 0 {
 			return jobs.Result{ErrorCode: "zajuna_session_expired", ErrorMessage: "Zajuna no devolvió cookies de sesión para la captura"}
@@ -146,6 +153,9 @@ func (w *CaptureBrowserWorker) Execute(ctx context.Context, job jobs.Job, report
 	if err != nil {
 		if errors.Is(err, capture.ErrLoginPage) {
 			return jobs.Result{ErrorCode: "zajuna_session_expired", ErrorMessage: "Zajuna redirigió la captura a la pantalla de login"}
+		}
+		if errors.Is(err, capture.ErrChallengePage) {
+			return jobs.Result{ErrorCode: "zajuna_challenge_required", ErrorMessage: "Zajuna pidió CAPTCHA o MFA; la captura no se automatiza"}
 		}
 		return jobs.Result{ErrorCode: "capture_failed", ErrorMessage: err.Error(), Retryable: true}
 	}

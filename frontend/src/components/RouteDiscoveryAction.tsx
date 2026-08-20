@@ -1,7 +1,8 @@
 import { Link } from 'react-router-dom'
 import { useDiscoverCourseMaps, useJobs, useSetupStatus } from '../hooks/api'
 import { friendlyJobStatus, friendlyJobType, jobStatusClass } from '../lib/format'
-import { friendlyError, useToast } from '../hooks/useToast'
+import { useToast } from '../hooks/useToast'
+import { friendlyError } from '../lib/friendlyError'
 
 interface RouteDiscoveryActionProps {
   variant?: 'primary' | 'ghost' | 'secondary'

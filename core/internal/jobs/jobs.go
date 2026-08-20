@@ -80,6 +80,7 @@ type Store interface {
 	RetryJob(ctx context.Context, id string, code string, message string) error
 	FailJob(ctx context.Context, id string, code string, message string) error
 	MarkCancelled(ctx context.Context, id string) error
+	ReconcileInterrupted(ctx context.Context) ([]Job, error)
 }
 
 type Runtime struct {
@@ -92,6 +93,7 @@ type Runtime struct {
 	wg          sync.WaitGroup
 	mu          sync.RWMutex
 	cancels     map[string]context.CancelFunc
+	inFlight    map[string]struct{}
 }
 
 func NewRuntime(store Store, concurrency int) (*Runtime, error) {
@@ -107,6 +109,7 @@ func NewRuntime(store Store, concurrency int) (*Runtime, error) {
 		queue:       make(chan string, concurrency*4),
 		concurrency: concurrency,
 		cancels:     map[string]context.CancelFunc{},
+		inFlight:    map[string]struct{}{},
 	}, nil
 }
 
@@ -132,6 +135,7 @@ func (r *Runtime) Start(parent context.Context) {
 		r.wg.Add(1)
 		go r.workerLoop()
 	}
+	r.recoverInterrupted()
 }
 
 func (r *Runtime) Close() {
@@ -202,23 +206,32 @@ func (r *Runtime) Events(ctx context.Context, id string) ([]Event, error) {
 }
 
 func (r *Runtime) Cancel(ctx context.Context, id string) error {
-	job, err := r.store.GetJob(ctx, id)
-	if err != nil {
-		return err
-	}
-	if job.Status == StatusCompleted || job.Status == StatusFailed || job.Status == StatusCancelled {
-		return fmt.Errorf("job %q ya terminó con estado %s", id, job.Status)
-	}
 	r.mu.RLock()
 	cancel := r.cancels[id]
 	r.mu.RUnlock()
 	if cancel != nil {
 		cancel()
 	}
-	return r.store.MarkCancelled(ctx, id)
+	if err := r.store.MarkCancelled(ctx, id); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *Runtime) execute(id string) {
+	r.mu.Lock()
+	if _, busy := r.inFlight[id]; busy {
+		r.mu.Unlock()
+		return
+	}
+	r.inFlight[id] = struct{}{}
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		delete(r.inFlight, id)
+		r.mu.Unlock()
+	}()
+
 	job, err := r.store.GetJob(r.ctx, id)
 	if err != nil {
 		return
@@ -252,7 +265,9 @@ func (r *Runtime) execute(id string) {
 	}
 	if result.ErrorMessage != "" {
 		if result.Retryable && job.Attempt < job.MaxAttempts {
-			_ = r.store.RetryJob(r.ctx, id, result.ErrorCode, result.ErrorMessage)
+			if err := r.store.RetryJob(r.ctx, id, result.ErrorCode, result.ErrorMessage); errors.Is(err, ErrInvalidTransition) {
+				return
+			}
 			r.enqueueRetry(id, time.Duration(job.Attempt)*500*time.Millisecond)
 			return
 		}
@@ -265,7 +280,23 @@ func (r *Runtime) execute(id string) {
 		_ = r.store.FailJob(r.ctx, id, "result_encode_failed", err.Error())
 		return
 	}
-	_ = r.store.CompleteJob(r.ctx, id, output)
+	if err := r.store.CompleteJob(r.ctx, id, output); err != nil && !errors.Is(err, ErrInvalidTransition) {
+		_ = r.store.FailJob(r.ctx, id, "result_persist_failed", err.Error())
+	}
+}
+
+func (r *Runtime) recoverInterrupted() {
+	jobsToResume, err := r.store.ReconcileInterrupted(r.ctx)
+	if err != nil {
+		return
+	}
+	for _, job := range jobsToResume {
+		select {
+		case r.queue <- job.ID:
+		case <-r.runtimeDone():
+			return
+		}
+	}
 }
 
 func (r *Runtime) enqueueRetry(id string, delay time.Duration) {

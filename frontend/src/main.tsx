@@ -17,7 +17,7 @@ import '@fontsource/ibm-plex-mono/latin-ext-600.css'
 import '@fontsource/ibm-plex-mono/latin-ext-700.css'
 import './index.css'
 import App from './App.tsx'
-import { ToastProvider } from './hooks/useToast'
+import { ToastProvider } from './hooks/ToastProvider'
 
 const queryClient = new QueryClient({
   defaultOptions: {

@@ -28,6 +28,7 @@ type CaptureResult struct {
 
 var ErrBlockedPage = errors.New("la página destino fue bloqueada por el sitio remoto")
 var ErrLoginPage = errors.New("la página destino es la pantalla de autenticación de Zajuna")
+var ErrChallengePage = errors.New("la página destino pide CAPTCHA o MFA")
 var ErrSelectorNotFound = errors.New("el selector requerido no apareció en la página destino")
 
 const browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -47,12 +48,18 @@ type CaptureOptions struct {
 	OwnerOnly       bool
 }
 
-// BrowserCookie is the minimal cookie shape needed to bridge an authenticated
-// HTTP session into an isolated Chromium context. It is never persisted.
+// BrowserCookie is the cookie shape needed to bridge an authenticated HTTP
+// session into an isolated Chromium context. It is never persisted.
 type BrowserCookie struct {
-	Name  string
-	Value string
-	URL   string
+	Name     string
+	Value    string
+	URL      string
+	Domain   string
+	Path     string
+	Secure   bool
+	HttpOnly bool
+	SameSite string
+	Expires  *time.Time
 }
 
 func Resolve(executablePath string) Runtime {
@@ -132,8 +139,11 @@ func (r Runtime) CaptureURLWithMetadataAndCookiesAndOptions(ctx context.Context,
 		ctx = context.Background()
 	}
 	parsed, err := url.Parse(targetURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+	if err != nil || parsed.Host == "" {
 		return CaptureResult{}, errors.New("la URL de captura debe ser http o https")
+	}
+	if err := ValidateCaptureNavigationURL(targetURL, parsed); err != nil {
+		return CaptureResult{}, err
 	}
 	if outputPath == "" {
 		return CaptureResult{}, errors.New("la ruta de salida de captura es obligatoria")
@@ -169,14 +179,11 @@ func (r Runtime) CaptureURLWithMetadataAndCookiesAndOptions(ctx context.Context,
 	if len(cookies) > 0 {
 		browserCookies := make([]playwright.OptionalCookie, 0, len(cookies))
 		for _, cookie := range cookies {
-			if cookie.Name == "" || cookie.URL == "" {
+			item, ok := cookie.playwrightCookie()
+			if !ok {
 				continue
 			}
-			browserCookies = append(browserCookies, playwright.OptionalCookie{
-				Name:  cookie.Name,
-				Value: cookie.Value,
-				URL:   playwright.String(cookie.URL),
-			})
+			browserCookies = append(browserCookies, item)
 		}
 		if len(browserCookies) > 0 {
 			if err := browserContext.AddCookies(browserCookies); err != nil {
@@ -192,6 +199,13 @@ func (r Runtime) CaptureURLWithMetadataAndCookiesAndOptions(ctx context.Context,
 }
 
 func capturePage(ctx context.Context, page playwright.Page, targetURL, absoluteOutput string, options CaptureOptions) (CaptureResult, error) {
+	parsedTarget, err := url.Parse(targetURL)
+	if err != nil || parsedTarget.Host == "" {
+		return CaptureResult{}, errors.New("la URL de captura debe ser http o https")
+	}
+	if err := ValidateCaptureNavigationURL(targetURL, parsedTarget); err != nil {
+		return CaptureResult{}, err
+	}
 	if options.ViewportWidth > 0 && options.ViewportHeight > 0 {
 		if err := page.SetViewportSize(options.ViewportWidth, options.ViewportHeight); err != nil {
 			return CaptureResult{}, fmt.Errorf("configurar viewport de captura: %w", err)
@@ -203,12 +217,18 @@ func capturePage(ctx context.Context, page playwright.Page, targetURL, absoluteO
 	_ = page.WaitForLoadState()
 	title, _ := page.Title()
 	finalURL := page.URL()
+	if err := ValidateCaptureNavigationURL(finalURL, parsedTarget); err != nil {
+		return CaptureResult{}, fmt.Errorf("captura bloqueada: %w", err)
+	}
 	if err := ctx.Err(); err != nil {
 		return CaptureResult{}, err
 	}
 	body, _ := page.Locator("body").InnerText()
 	if isZajunaLoginPage(finalURL, title, body) {
 		return CaptureResult{}, fmt.Errorf("%w: URL final %s", ErrLoginPage, finalURL)
+	}
+	if isChallengePage(finalURL, title, body) {
+		return CaptureResult{}, fmt.Errorf("%w: URL final %s", ErrChallengePage, finalURL)
 	}
 	if blocked, blockedErr := isBlockedPage(page, title); blocked {
 		return CaptureResult{}, blockedErr
@@ -492,4 +512,36 @@ func (r Runtime) RenderHTMLToPDF(ctx context.Context, htmlContent, outputPath st
 		return fmt.Errorf("guardar PDF: %w", err)
 	}
 	return nil
+}
+
+func (c BrowserCookie) playwrightCookie() (playwright.OptionalCookie, bool) {
+	if strings.TrimSpace(c.Name) == "" {
+		return playwright.OptionalCookie{}, false
+	}
+	item := playwright.OptionalCookie{
+		Name:     c.Name,
+		Value:    c.Value,
+		HttpOnly: playwright.Bool(c.HttpOnly),
+		Secure:   playwright.Bool(c.Secure),
+	}
+	if strings.TrimSpace(c.Domain) != "" && strings.TrimSpace(c.Path) != "" {
+		item.Domain = playwright.String(c.Domain)
+		item.Path = playwright.String(c.Path)
+	} else if strings.TrimSpace(c.URL) != "" {
+		item.URL = playwright.String(c.URL)
+	} else {
+		return playwright.OptionalCookie{}, false
+	}
+	if c.Expires != nil {
+		item.Expires = playwright.Float(float64(c.Expires.Unix()))
+	}
+	switch strings.ToLower(strings.TrimSpace(c.SameSite)) {
+	case "strict":
+		item.SameSite = playwright.SameSiteAttributeStrict
+	case "none":
+		item.SameSite = playwright.SameSiteAttributeNone
+	case "lax":
+		item.SameSite = playwright.SameSiteAttributeLax
+	}
+	return item, true
 }

@@ -450,11 +450,18 @@ bloque `storage` de `/api/settings` y solicita confirmación antes de ejecutar.
 
 ### `POST /api/backups/{name}/restore`
 
-Valida el ZIP y lo deja preparado en una carpeta privada para el siguiente
-arranque. Antes crea automáticamente una copia de seguridad de protección y
-responde `202` con `restartRequired: true`; la base activa nunca se reemplaza
-mientras el core está atendiendo peticiones. El arranque aplica el restore
-antes de abrir SQLite y elimina los temporales al terminar.
+Valida el ZIP (archivos regulares, SHA256 del snapshot y versión de schema) y
+lo deja preparado en una carpeta privada para el siguiente arranque. Antes
+crea automáticamente una copia de seguridad de protección y responde `202`
+con `restartRequired: true`; la base activa nunca se reemplaza mientras el
+core está atendiendo peticiones.
+
+En el arranque, `StageRestore` ejecuta `PRAGMA integrity_check` y comprueba
+las tablas mínimas (`schema_migrations`, `jobs`, `fichas`, `evidences`)
+antes de marcar `.restore-pending`. El swap es atómico. Si `sqlite.Open`
+falla después del swap, el core restaura `*.restore-old`, registra
+`.restore-applied.json` y reintenta abrir la base anterior. Un ZIP corrupto,
+con hash incorrecto o schema fuera de 1…12 se rechaza y no toca la DB activa.
 
 ## Evidencias y reportes
 

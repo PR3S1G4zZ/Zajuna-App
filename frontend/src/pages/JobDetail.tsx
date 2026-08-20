@@ -1,7 +1,8 @@
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { PageError, PageSkeleton } from '../components/AsyncState'
 import { useCancelJob, useJob, useJobEvents } from '../hooks/api'
-import { friendlyError, useToast } from '../hooks/useToast'
+import { useToast } from '../hooks/useToast'
+import { friendlyError } from '../lib/friendlyError'
 import {
   formatDate,
   friendlyJobMessage,

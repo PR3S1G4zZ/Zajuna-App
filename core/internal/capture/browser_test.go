@@ -50,6 +50,12 @@ func TestLoginAndBlockedPageMarkers(t *testing.T) {
 	if containsBlockedPageMarkers("Curso de Animación 3D") {
 		t.Fatal("normal course content was falsely classified as blocked")
 	}
+	if !isChallengePage("https://zajuna.sena.edu.co/zajuna/login/index.php", "Verificación", "Complete el reCAPTCHA para continuar") {
+		t.Fatal("CAPTCHA page was not detected")
+	}
+	if isChallengePage("https://zajuna.sena.edu.co/zajuna/course/view.php?id=41080", "Curso", "Contenido del curso") {
+		t.Fatal("course content was falsely classified as a challenge")
+	}
 }
 
 func TestCaptureURLSmoke(t *testing.T) {

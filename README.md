@@ -10,6 +10,8 @@ duplicadas.
 
 La migración completa, las decisiones técnicas, las tareas abiertas y la
 matriz de pruebas están en [`docs/desktop-migration.md`](docs/desktop-migration.md).
+El cierre de Linear M0/M1 (2026-08-20) está en
+[`docs/hardening-2026-08-20.md`](docs/hardening-2026-08-20.md).
 
 ## Arquitectura actual
 
@@ -65,6 +67,7 @@ npm run build --prefix frontend
 npm run lint --prefix frontend
 go -C core test ./...
 go -C core vet ./...
+npm run test:downloads
 npm audit --omit=dev --audit-level=high
 npm run test:browser:core
 ```
@@ -105,4 +108,4 @@ npm run test:smoke:external-browser
 - `core/`: API, SQLite, workers, capturas y reportes Go.
 - `desktop/`: ciclo de vida Electron y supervisor del core.
 - `scripts/`: sincronización, build, staging, metadata y smoke.
-- `docs/`: arquitectura, API, auditorías y plan de migración.
+- `docs/`: arquitectura, API, auditorías, plan de migración y registro de hardening.

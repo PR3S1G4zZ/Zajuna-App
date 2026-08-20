@@ -22,6 +22,7 @@ const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 
 var ErrAuthentication = errors.New("autenticación de Zajuna rechazada")
 var ErrSessionExpired = errors.New("sesión de Zajuna vencida")
+var ErrChallengeRequired = errors.New("Zajuna requiere intervención humana (CAPTCHA o MFA)")
 
 type HTTPStatusError struct {
 	StatusCode int
@@ -135,6 +136,9 @@ func (c *Client) Login(ctx context.Context, credentials Credentials) (Session, e
 	if err != nil {
 		return Session{}, err
 	}
+	if looksLikeChallengePage(initialBody) {
+		return Session{}, ErrChallengeRequired
+	}
 	if initialResponse.StatusCode >= 400 {
 		return Session{}, fmt.Errorf("%w: login HTTP %d", ErrAuthentication, initialResponse.StatusCode)
 	}
@@ -167,6 +171,9 @@ func (c *Client) Login(ctx context.Context, credentials Credentials) (Session, e
 		response.Body.Close()
 		if err != nil {
 			return Session{}, err
+		}
+		if looksLikeChallengePage(loginBody) {
+			return Session{}, ErrChallengeRequired
 		}
 		if location == "" {
 			location = metaRedirect(loginBody)
@@ -353,6 +360,29 @@ func metaRedirect(body string) string {
 func looksLikeLoginPage(body string) bool {
 	lower := strings.ToLower(body)
 	return strings.Contains(lower, "login__form-cursos") || strings.Contains(lower, "form_login_user")
+}
+
+func looksLikeChallengePage(body string) bool {
+	lower := strings.ToLower(body)
+	markers := []string{
+		"g-recaptcha",
+		"h-captcha",
+		"hcaptcha",
+		"recaptcha",
+		"captcha",
+		"autenticación de dos factores",
+		"autenticacion de dos factores",
+		"two-factor",
+		"two factor",
+		"código de verificación",
+		"codigo de verificacion",
+	}
+	for _, marker := range markers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func mustURL(raw string) *url.URL {

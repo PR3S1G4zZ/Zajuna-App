@@ -3,7 +3,9 @@ package sqlite
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,6 +92,9 @@ func TestJobNotificationsPersistAndCanBeRead(t *testing.T) {
 	if err := store.CreateJob(context.Background(), jobs.Job{ID: "job-notification", Type: "sync-fichas", Status: jobs.StatusQueued, Input: []byte(`{}`), CreatedAt: now, UpdatedAt: now, MaxAttempts: 3}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.MarkRunning(context.Background(), "job-notification"); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.CompleteJob(context.Background(), "job-notification", []byte(`{"ok":true}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -108,6 +113,9 @@ func TestJobNotificationsPersistAndCanBeRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.CreateJob(context.Background(), jobs.Job{ID: "job-notification-muted", Type: "sync-fichas", Status: jobs.StatusQueued, Input: []byte(`{}`), CreatedAt: now, UpdatedAt: now, MaxAttempts: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkRunning(context.Background(), "job-notification-muted"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.CompleteJob(context.Background(), "job-notification-muted", []byte(`{}`)); err != nil {
@@ -294,5 +302,94 @@ func TestEvidenceGroupsShareEquivalentPageSignatures(t *testing.T) {
 	loaded, err := store.ListEvidenceGroups(context.Background(), fichaID)
 	if err != nil || len(loaded) != 2 {
 		t.Fatalf("persisted groups were not loaded: %#v (%v)", loaded, err)
+	}
+}
+
+func TestJobTransitionsAreAtomicAndRejectInvalidStates(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.CreateJob(context.Background(), jobs.Job{ID: "job-cas", Type: "sync-fichas", Status: jobs.StatusQueued, Input: []byte(`{}`), CreatedAt: now, UpdatedAt: now, MaxAttempts: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteJob(context.Background(), "job-cas", []byte(`{}`)); !errors.Is(err, jobs.ErrInvalidTransition) {
+		t.Fatalf("completing a queued job should be rejected: %v", err)
+	}
+	if _, err := store.MarkRunning(context.Background(), "job-cas"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteJob(context.Background(), "job-cas", []byte(`{"ok":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkCancelled(context.Background(), "job-cas"); !errors.Is(err, jobs.ErrInvalidTransition) {
+		t.Fatalf("cancel after completion should be rejected: %v", err)
+	}
+	events, err := store.ListJobEvents(context.Background(), "job-cas")
+	if err != nil || len(events) < 2 {
+		t.Fatalf("expected transactional status events, got %#v (%v)", events, err)
+	}
+}
+
+func TestConcurrentMarkRunningAllowsASingleWinner(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.CreateJob(context.Background(), jobs.Job{ID: "job-race", Type: "sync-fichas", Status: jobs.StatusQueued, Input: []byte(`{}`), CreatedAt: now, UpdatedAt: now, MaxAttempts: 3}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	winners := make(chan struct{}, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := store.MarkRunning(context.Background(), "job-race"); err == nil {
+				winners <- struct{}{}
+			}
+		}()
+	}
+	wg.Wait()
+	close(winners)
+	if len(winners) != 1 {
+		t.Fatalf("expected a single running transition, got %d", len(winners))
+	}
+	job, err := store.GetJob(context.Background(), "job-race")
+	if err != nil || job.Status != jobs.StatusRunning || job.Attempt != 1 {
+		t.Fatalf("unexpected winner state: %#v (%v)", job, err)
+	}
+}
+
+func TestReconcileInterruptedJobsAfterSimulatedRestart(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.CreateJob(context.Background(), jobs.Job{ID: "job-orphan", Type: "sync-fichas", Status: jobs.StatusQueued, Input: []byte(`{}`), CreatedAt: now, UpdatedAt: now, MaxAttempts: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkRunning(context.Background(), "job-orphan"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateJob(context.Background(), jobs.Job{ID: "job-queued", Type: "sync-fichas", Status: jobs.StatusQueued, Input: []byte(`{}`), CreatedAt: now, UpdatedAt: now, MaxAttempts: 3}); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := store.ReconcileInterrupted(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ready) != 2 {
+		t.Fatalf("expected queued and recovered jobs, got %#v", ready)
+	}
+	orphan, err := store.GetJob(context.Background(), "job-orphan")
+	if err != nil || orphan.Status != jobs.StatusRetrying || orphan.ErrorCode != "interrupted" {
+		t.Fatalf("running job was not recovered: %#v (%v)", orphan, err)
 	}
 }

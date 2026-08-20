@@ -1452,14 +1452,11 @@ func normalizeLimit(limit int) int {
 
 func (s *Store) MarkRunning(ctx context.Context, id string) (jobs.Job, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ?, attempt = attempt + 1, started_at = ?, finished_at = NULL, updated_at = ? WHERE id = ?`, jobs.StatusRunning, now, now, id)
-	if err != nil {
-		return jobs.Job{}, fmt.Errorf("mark job running: %w", err)
-	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		return jobs.Job{}, sql.ErrNoRows
-	}
-	if err := s.AppendEvent(ctx, jobs.Event{JobID: id, Kind: "status", Stage: "running", Message: "Trabajo iniciado", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.transitionJob(ctx, id, jobs.AllowedSources(jobs.StatusRunning),
+		`UPDATE jobs SET status = ?, attempt = attempt + 1, started_at = ?, finished_at = NULL, updated_at = ?`,
+		[]any{jobs.StatusRunning, now, now},
+		jobs.Event{JobID: id, Kind: "status", Stage: "running", Message: "Trabajo iniciado", CreatedAt: time.Now().UTC()},
+	); err != nil {
 		return jobs.Job{}, err
 	}
 	return s.GetJob(ctx, id)
@@ -1473,7 +1470,7 @@ func (s *Store) UpdateProgress(ctx context.Context, id string, stage string, pro
 		progress = 100
 	}
 	now := time.Now().UTC()
-	if _, err := s.db.ExecContext(ctx, `UPDATE jobs SET stage = ?, progress = ?, message = ?, updated_at = ? WHERE id = ?`, stage, progress, message, now.Format(time.RFC3339Nano), id); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE jobs SET stage = ?, progress = ?, message = ?, updated_at = ? WHERE id = ? AND status = ?`, stage, progress, message, now.Format(time.RFC3339Nano), id, jobs.StatusRunning); err != nil {
 		return fmt.Errorf("update job progress: %w", err)
 	}
 	return s.AppendEvent(ctx, jobs.Event{JobID: id, Kind: "progress", Stage: stage, Progress: progress, Message: message, CreatedAt: now})
@@ -1517,10 +1514,11 @@ func (s *Store) ListJobEvents(ctx context.Context, id string) ([]jobs.Event, err
 
 func (s *Store) CompleteJob(ctx context.Context, id string, output json.RawMessage) error {
 	now := time.Now().UTC()
-	if _, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ?, result_json = ?, progress = 100, stage = 'completed', message = 'Trabajo completado', finished_at = ?, updated_at = ? WHERE id = ?`, jobs.StatusCompleted, string(output), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), id); err != nil {
-		return fmt.Errorf("complete job: %w", err)
-	}
-	if err := s.AppendEvent(ctx, jobs.Event{JobID: id, Kind: "status", Stage: "completed", Progress: 100, Message: "Trabajo completado", CreatedAt: now}); err != nil {
+	if err := s.transitionJob(ctx, id, jobs.AllowedSources(jobs.StatusCompleted),
+		`UPDATE jobs SET status = ?, result_json = ?, progress = 100, stage = 'completed', message = 'Trabajo completado', finished_at = ?, updated_at = ?`,
+		[]any{jobs.StatusCompleted, string(output), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)},
+		jobs.Event{JobID: id, Kind: "status", Stage: "completed", Progress: 100, Message: "Trabajo completado", CreatedAt: now},
+	); err != nil {
 		return err
 	}
 	s.createJobNotification(ctx, id, "job_completed", "Trabajo completado", "El proceso terminó correctamente.")
@@ -1529,18 +1527,20 @@ func (s *Store) CompleteJob(ctx context.Context, id string, output json.RawMessa
 
 func (s *Store) RetryJob(ctx context.Context, id string, code string, message string) error {
 	now := time.Now().UTC()
-	if _, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ?, error_code = ?, error_message = ?, updated_at = ? WHERE id = ?`, jobs.StatusRetrying, code, message, now.Format(time.RFC3339Nano), id); err != nil {
-		return fmt.Errorf("retry job: %w", err)
-	}
-	return s.AppendEvent(ctx, jobs.Event{JobID: id, Kind: "retry", Stage: "retrying", Message: message, CreatedAt: now})
+	return s.transitionJob(ctx, id, jobs.AllowedSources(jobs.StatusRetrying),
+		`UPDATE jobs SET status = ?, error_code = ?, error_message = ?, updated_at = ?`,
+		[]any{jobs.StatusRetrying, code, message, now.Format(time.RFC3339Nano)},
+		jobs.Event{JobID: id, Kind: "retry", Stage: "retrying", Message: message, CreatedAt: now},
+	)
 }
 
 func (s *Store) FailJob(ctx context.Context, id string, code string, message string) error {
 	now := time.Now().UTC()
-	if _, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ?, error_code = ?, error_message = ?, stage = 'failed', message = ?, finished_at = ?, updated_at = ? WHERE id = ?`, jobs.StatusFailed, code, message, message, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), id); err != nil {
-		return fmt.Errorf("fail job: %w", err)
-	}
-	if err := s.AppendEvent(ctx, jobs.Event{JobID: id, Kind: "status", Stage: "failed", Message: message, CreatedAt: now}); err != nil {
+	if err := s.transitionJob(ctx, id, jobs.AllowedSources(jobs.StatusFailed),
+		`UPDATE jobs SET status = ?, error_code = ?, error_message = ?, stage = 'failed', message = ?, finished_at = ?, updated_at = ?`,
+		[]any{jobs.StatusFailed, code, message, message, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)},
+		jobs.Event{JobID: id, Kind: "status", Stage: "failed", Message: message, CreatedAt: now},
+	); err != nil {
 		return err
 	}
 	s.createJobNotification(ctx, id, "job_failed", "Trabajo necesita atención", fmt.Sprintf("El proceso terminó con el código %s.", code))
@@ -1549,10 +1549,113 @@ func (s *Store) FailJob(ctx context.Context, id string, code string, message str
 
 func (s *Store) MarkCancelled(ctx context.Context, id string) error {
 	now := time.Now().UTC()
-	if _, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ?, stage = 'cancelled', message = 'Trabajo cancelado', finished_at = ?, updated_at = ? WHERE id = ? AND status NOT IN (?, ?, ?)`, jobs.StatusCancelled, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), id, jobs.StatusCompleted, jobs.StatusFailed, jobs.StatusCancelled); err != nil {
-		return fmt.Errorf("cancel job: %w", err)
+	return s.transitionJob(ctx, id, jobs.AllowedSources(jobs.StatusCancelled),
+		`UPDATE jobs SET status = ?, stage = 'cancelled', message = 'Trabajo cancelado', finished_at = ?, updated_at = ?`,
+		[]any{jobs.StatusCancelled, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)},
+		jobs.Event{JobID: id, Kind: "status", Stage: "cancelled", Message: "Trabajo cancelado", CreatedAt: now},
+	)
+}
+
+func (s *Store) ReconcileInterrupted(ctx context.Context) ([]jobs.Job, error) {
+	interrupted, err := s.listJobsByStatus(ctx, jobs.StatusRunning, jobs.StatusRetrying, jobs.StatusQueued)
+	if err != nil {
+		return nil, err
 	}
-	return s.AppendEvent(ctx, jobs.Event{JobID: id, Kind: "status", Stage: "cancelled", Message: "Trabajo cancelado", CreatedAt: now})
+	ready := make([]jobs.Job, 0, len(interrupted))
+	for _, job := range interrupted {
+		switch job.Status {
+		case jobs.StatusRunning:
+			if job.Attempt < job.MaxAttempts {
+				if err := s.RetryJob(ctx, job.ID, "interrupted", "el core se reinició mientras el trabajo estaba en ejecución"); err != nil && !errors.Is(err, jobs.ErrInvalidTransition) {
+					return nil, err
+				}
+			} else if err := s.FailJob(ctx, job.ID, "interrupted", "el trabajo quedó huérfano tras reiniciar el core"); err != nil && !errors.Is(err, jobs.ErrInvalidTransition) {
+				return nil, err
+			} else {
+				continue
+			}
+			job, err = s.GetJob(ctx, job.ID)
+			if err != nil {
+				return nil, err
+			}
+			if job.Status == jobs.StatusRetrying || job.Status == jobs.StatusQueued {
+				ready = append(ready, job)
+			}
+		default:
+			ready = append(ready, job)
+		}
+	}
+	return ready, nil
+}
+
+func (s *Store) listJobsByStatus(ctx context.Context, statuses ...jobs.Status) ([]jobs.Job, error) {
+	if len(statuses) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(statuses))
+	args := make([]any, len(statuses))
+	for i, status := range statuses {
+		placeholders[i] = "?"
+		args[i] = status
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, type, status, input_json, COALESCE(result_json, ''), progress, stage, message,
+		       attempt, max_attempts, error_code, error_message, created_at, started_at, finished_at, updated_at
+		FROM jobs WHERE status IN (`+strings.Join(placeholders, ", ")+`) ORDER BY updated_at`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list jobs by status: %w", err)
+	}
+	defer rows.Close()
+	result := make([]jobs.Job, 0)
+	for rows.Next() {
+		job, err := scanJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan interrupted job: %w", err)
+		}
+		result = append(result, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read interrupted jobs: %w", err)
+	}
+	return result, nil
+}
+
+func (s *Store) transitionJob(ctx context.Context, id string, from []jobs.Status, setSQL string, setArgs []any, event jobs.Event) error {
+	if len(from) == 0 {
+		return jobs.ErrInvalidTransition
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin job transition: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	placeholders := make([]string, len(from))
+	args := append([]any{}, setArgs...)
+	args = append(args, id)
+	for i, status := range from {
+		placeholders[i] = "?"
+		args = append(args, status)
+	}
+	result, err := tx.ExecContext(ctx, setSQL+` WHERE id = ? AND status IN (`+strings.Join(placeholders, ", ")+`)`, args...)
+	if err != nil {
+		return fmt.Errorf("job transition: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return jobs.ErrInvalidTransition
+	}
+	data := string(event.Data)
+	if data == "" {
+		data = "{}"
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO job_events(job_id, kind, stage, progress, message, data_json, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		event.JobID, event.Kind, event.Stage, event.Progress, event.Message, data, event.CreatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("append job event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit job transition: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) CreateSchedule(ctx context.Context, schedule scheduler.Schedule) error {

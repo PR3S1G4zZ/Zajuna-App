@@ -2,6 +2,7 @@ package zajuna
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -233,5 +234,40 @@ func TestDiscoverCourseMapWithLocalFixture(t *testing.T) {
 	}
 	if record.ByItemCode["route.forum"] == nil || record.ByItemCode["route.page"] == nil {
 		t.Fatalf("expected grouped route categories: %#v", record.ByItemCode)
+	}
+}
+
+func TestLoginRejectsCaptchaChallengeWithoutAutomatingIt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/controllers/login_user/lg.php" {
+			_, _ = w.Write([]byte(`<html><body><div class="g-recaptcha" data-sitekey="fixture"></div><p>Complete el captcha</p></body></html>`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	client, err := newClient(server.URL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Login(context.Background(), Credentials{DocumentType: "CC", Document: "123456", Password: "fixture-secret"})
+	if !errors.Is(err, ErrChallengeRequired) {
+		t.Fatalf("expected challenge error, got %v", err)
+	}
+}
+
+func TestListFichasTreatsLoginPageAsExpiredSession(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<form class="login__form-cursos"><input name="form_login_user"></form>`))
+	}))
+	defer server.Close()
+	client, err := newClient(server.URL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := Session{Client: server.Client(), BaseURL: server.URL}
+	_, err = client.ListFichas(context.Background(), session)
+	if !errors.Is(err, ErrSessionExpired) {
+		t.Fatalf("expected expired session, got %v", err)
 	}
 }

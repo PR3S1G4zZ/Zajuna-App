@@ -18,6 +18,13 @@ const apiProxy = {
 export default defineConfig({
   plugins: [react()],
   base: '/',
+  // Inline PostCSS so Vite never walks to a machine-global config such as
+  // C:\postcss.config.mjs. The project does not use Tailwind.
+  css: {
+    postcss: {
+      plugins: [],
+    },
+  },
   server: { proxy: apiProxy },
   preview: { proxy: apiProxy },
   build: {

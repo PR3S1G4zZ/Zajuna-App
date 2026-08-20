@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useSaveSetup } from '../hooks/api'
-import { friendlyError, useToast } from '../hooks/useToast'
+import { useToast } from '../hooks/useToast'
+import { friendlyError } from '../lib/friendlyError'
 
 export function Setup() {
   const saveSetup = useSaveSetup()

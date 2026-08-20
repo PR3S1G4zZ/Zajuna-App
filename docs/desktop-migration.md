@@ -1,12 +1,13 @@
 # Migración de Zajuna Sync a Zajuna App Desktop
 
-**Estado del documento:** consolidado después de la auditoría OWASP y de los
-bloques de remediación paralelos.  
-**Fecha:** 2026-08-09  
-**Código de entrega:** `C:\Users\USUARIO\Downloads\Zajuna.App`
+**Estado del documento:** consolidado después de la auditoría OWASP y del
+hardening M0/M1 (2026-08-20).  
+**Fecha:** 2026-08-20  
+**Código de entrega:** repositorio `Zajuna-App`
 
-Este documento reemplaza la narrativa anterior de la migración. Es el punto de
-partida para las siguientes tareas, pruebas de cliente y decisiones de release.
+El registro de Linear de esa jornada está en
+[`hardening-2026-08-20.md`](hardening-2026-08-20.md). Este documento sigue
+siendo el punto de partida para pruebas de cliente y decisiones de release.
 El repositorio `D:\zajuna\zajuna-sync-` solo se consulta como referencia; no se
 ejecuta, modifica ni se distribuye con la aplicación.
 
@@ -154,35 +155,46 @@ sistema.
   rechaza URLs con origen, credenciales, query o fragmento distintos de
   `http://127.0.0.1:<puerto>/`.
 
+### Cerrado en código (2026-08-20)
+
+- Jobs: transiciones CAS, un worker por id y recuperación de huérfanos al arrancar.
+- Backups: SHA256, `PRAGMA integrity_check`, schema y rollback si `sqlite.Open` falla.
+- Captura: cookies acotadas al origen, URL final validada y aborto de CAPTCHA/MFA.
+
 ### Pendiente antes de una entrega comercial
 
 | Prioridad | Tarea | Motivo |
 |---|---|---|
-| P0 | Firma digital de instaladores y ejecutables. | Evitar advertencias de Windows/macOS y asegurar procedencia. |
-| P0 | Smoke nativo de DMG/AppImage y ciclo instalar/actualizar/desinstalar. | La estación actual solo valida Windows. |
-| P1 | Transiciones atómicas de jobs, cancelación CAS y recuperación tras reinicio. | Evitar estados `running`/`retrying` huérfanos. |
-| P1 | Validación SQLite completa y rollback automático al restaurar backup. | Evitar reemplazar la base activa por un ZIP corrupto. |
-| P1 | Pasada manual WCAG con teclado, NVDA y VoiceOver. | El smoke automatizado no sustituye un lector de pantalla. |
-| P1 | Validación autenticada por curso, CAPTCHA/MFA y cambios de selectores. | Confirmar comportamiento real fuera de fixtures. |
+| P0 | Firma digital de instaladores y ejecutables (MDL-29). | Evitar advertencias de Windows/macOS y asegurar procedencia. |
+| P0 | Smoke nativo de DMG/AppImage y ciclo instalar/actualizar/desinstalar (MDL-29). | La estación actual solo valida Windows. |
+| P1 | Pasada manual WCAG con teclado, NVDA y VoiceOver (MDL-32). | El smoke automatizado no sustituye un lector de pantalla. |
+| P1 | E2E autenticado con cuenta de prueba real (MDL-33). | Fixtures cubren login vencido, CAPTCHA y redirects; falta cuenta viva. |
+| P1 | Gate de release con matriz y acta (MDL-34). | No afirmar versión lista sin logs/artefactos frescos. |
 | P2 | Completar workflows administrativos y adaptadores externos opcionales. | No bloquean el runtime local principal. |
 
 La auditoría manual OWASP no encontró vulnerabilidades npm de producción; el
 escáner automatizado Codex Security no pudo iniciar por un fallo de su
 workbench, por lo que no se presenta una certificación automática.
 
+CAPTCHA y MFA no se resuelven automáticamente. Si Zajuna muestra reCAPTCHA,
+hCaptcha o un segundo factor, el cliente HTTP y Chromium abortan con
+`zajuna_challenge_required` y no capturan. Una sesión vencida produce
+`zajuna_session_expired` y no guarda evidencia anónima. La prueba viva se
+ejecuta con `ZAJUNA_E2E=1` y credenciales solo en variables de entorno
+(`ZAJUNA_TEST_USERNAME`, `ZAJUNA_TEST_PASSWORD`); nunca se versionan.
+
 ## 5. Pruebas y criterios de aceptación
 
 Pruebas verdes en Windows durante esta consolidación:
 
 ```text
+npm ci --prefix frontend
 npm run build --prefix frontend
-npm run lint --prefix frontend       # solo 2 warnings preexistentes de useToast
-go test ./...
-go vet ./...
-npm audit --omit=dev --audit-level=high       # 0 vulnerabilidades
-npm run build:platforms
-npm run test:browser:core
-npm run test:smoke:packaged   # core + Chromium/Playwright + /api/health
+npm run lint --prefix frontend       # oxlint exit 0
+go -C core test ./...
+go -C core vet ./...
+node scripts/prepare-downloads.test.cjs
+npm audit --omit=dev --audit-level=high
 ```
 
 El smoke visual se ejecuta en 1440×900, 1024×900 y 390×844, verifica overflow,
@@ -195,11 +207,11 @@ El instalador Windows actual incluye core Go y Chromium/Playwright, responde a
 
 ## 6. Cómo continuar
 
-1. Probar el instalador Windows con una cuenta de prueba y registrar resultados
-   de setup, sincronización, captura, reporte, backup y cierre.
-2. Ejecutar en runners macOS/Linux `npm run package:macos` y
-   `npm run package:linux`, instalar Chromium allí y correr el smoke nativo.
-3. Resolver los P0/P1 de la tabla anterior.
-4. Repetir la auditoría OWASP y la revisión manual WCAG.
-5. Solo después preparar firma, logo, iconos, actualización automática y
-   publicación comercial.
+El detalle de Linear está en [`hardening-2026-08-20.md`](hardening-2026-08-20.md).
+
+1. Ejecutar el E2E autenticado con cuenta de prueba (`ZAJUNA_E2E=1`) y registrar
+   selectores no sensibles (MDL-33).
+2. Firmar instaladores y correr smoke nativo en Windows, macOS y Linux (MDL-29).
+3. Pasada manual WCAG con teclado, zoom 200 % y NVDA/VoiceOver (MDL-32).
+4. Gate de release con matriz y acta; no marcar Done sin artefactos (MDL-34).
+5. Solo después preparar logo, iconos, actualización automática y publicación.

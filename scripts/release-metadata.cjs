@@ -67,5 +67,8 @@ function writeMetadata() {
   console.log(`Metadata de release generada para ${artifacts.length} artefacto(s).`);
 }
 
-if (require.main === module) writeMetadata();
+if (require.main === module) {
+  writeMetadata();
+  require('./prepare-downloads.cjs').writeDownloadsPage();
+}
 module.exports = { writeMetadata };

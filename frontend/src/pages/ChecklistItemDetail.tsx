@@ -10,7 +10,8 @@ import {
   useSetupStatus,
   useTargets,
 } from '../hooks/api'
-import { friendlyError, useToast } from '../hooks/useToast'
+import { useToast } from '../hooks/useToast'
+import { friendlyError } from '../lib/friendlyError'
 import { confidenceFor, formatDate, routeStatusClass, routeStatusLabel } from '../lib/format'
 import type { ItemStatus, RouteTarget } from '../types'
 

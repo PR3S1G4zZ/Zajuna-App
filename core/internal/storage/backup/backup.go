@@ -3,6 +3,8 @@ package backup
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/zajuna-app/core/internal/storage/sqlite"
 )
 
 type Snapshotter interface {
@@ -25,11 +29,28 @@ type Record struct {
 	SizeBytes int64     `json:"sizeBytes"`
 }
 
+type fileDigest struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256"`
+}
+
 type manifest struct {
-	FormatVersion string    `json:"formatVersion"`
-	CreatedAt     time.Time `json:"createdAt"`
-	Files         []string  `json:"files"`
-	Secrets       string    `json:"secrets"`
+	FormatVersion string       `json:"formatVersion"`
+	CreatedAt     time.Time    `json:"createdAt"`
+	Files         []string     `json:"files"`
+	Hashes        []fileDigest `json:"hashes,omitempty"`
+	SchemaVersion int          `json:"schemaVersion,omitempty"`
+	Secrets       string       `json:"secrets"`
+}
+
+type appliedRestore struct {
+	Items []appliedItem `json:"items"`
+}
+
+type appliedItem struct {
+	Target string `json:"target"`
+	Old    string `json:"old"`
+	HadOld bool   `json:"hadOld"`
 }
 
 type Manager struct {
@@ -39,8 +60,9 @@ type Manager struct {
 }
 
 const (
-	pendingRestoreDir = ".restore-pending"
-	maxRestoreBytes   = 250 * 1024 * 1024
+	pendingRestoreDir  = ".restore-pending"
+	appliedRestoreFile = ".restore-applied.json"
+	maxRestoreBytes    = 250 * 1024 * 1024
 )
 
 // RestoreResult describes a validated restore staged for the next process
@@ -120,10 +142,19 @@ func (m *Manager) Create(ctx context.Context) (Record, error) {
 		return Record{}, err
 	}
 	sort.Strings(files)
+	if err := sqlite.ValidateRestoredDatabase(databasePath); err != nil {
+		return Record{}, fmt.Errorf("el snapshot de SQLite no es restaurable: %w", err)
+	}
+	hashes, err := hashFiles(temporaryDir, files)
+	if err != nil {
+		return Record{}, err
+	}
 	contents, err := json.MarshalIndent(manifest{
 		FormatVersion: "1",
 		CreatedAt:     createdAt,
 		Files:         files,
+		Hashes:        hashes,
+		SchemaVersion: sqlite.CurrentSchemaVersion(),
 		Secrets:       "Las credenciales permanecen en el almacén seguro del sistema y no se incluyen.",
 	}, "", "  ")
 	if err != nil {
@@ -248,6 +279,7 @@ func (m *Manager) StageRestore(ctx context.Context, name string) (Record, error)
 	}
 	defer os.RemoveAll(temporaryDir)
 	var total int64
+	expectedHashes := hashMap(manifestValue.Hashes)
 	for _, file := range archive.File {
 		if file.Name == "manifest.json" {
 			continue
@@ -278,7 +310,8 @@ func (m *Manager) StageRestore(ctx context.Context, name string) (Record, error)
 			input.Close()
 			return Record{}, fmt.Errorf("create restore member %s: %w", file.Name, err)
 		}
-		written, copyErr := io.CopyN(output, input, int64(file.UncompressedSize64))
+		hasher := sha256.New()
+		written, copyErr := io.CopyN(io.MultiWriter(output, hasher), input, int64(file.UncompressedSize64))
 		closeInputErr := input.Close()
 		closeOutputErr := output.Close()
 		if copyErr != nil && !(copyErr == io.EOF && written == int64(file.UncompressedSize64)) {
@@ -287,7 +320,22 @@ func (m *Manager) StageRestore(ctx context.Context, name string) (Record, error)
 		if closeInputErr != nil || closeOutputErr != nil {
 			return Record{}, fmt.Errorf("close restored member %s", file.Name)
 		}
+		if expected := expectedHashes[cleanName]; expected != "" {
+			if got := hex.EncodeToString(hasher.Sum(nil)); got != expected {
+				return Record{}, fmt.Errorf("el hash de %s no coincide con el manifiesto", file.Name)
+			}
+		}
 		total += written
+	}
+	if len(expectedHashes) > 0 {
+		for name := range files {
+			if expectedHashes[name] == "" {
+				return Record{}, fmt.Errorf("el manifiesto no declara hash para %s", name)
+			}
+		}
+	}
+	if err := verifyStagedDatabase(temporaryDir, manifestValue); err != nil {
+		return Record{}, err
 	}
 	manifestBytes, _ := json.MarshalIndent(manifestValue, "", "  ")
 	if err := os.WriteFile(filepath.Join(temporaryDir, "manifest.json"), append(manifestBytes, '\n'), 0o600); err != nil {
@@ -323,6 +371,10 @@ func ApplyPending(dataDir string) (bool, error) {
 	}
 	if manifestValue.FormatVersion != "1" || !containsFile(manifestValue.Files, "database.sqlite") {
 		return false, errors.New("la restauración pendiente no tiene un manifiesto compatible")
+	}
+	if err := verifyStagedDatabase(pendingPath, manifestValue); err != nil {
+		_ = os.RemoveAll(pendingPath)
+		return false, err
 	}
 	paths := []string{"database.sqlite"}
 	seen := map[string]bool{"database.sqlite": true}
@@ -386,9 +438,20 @@ func ApplyPending(dataDir string) (bool, error) {
 			rollback()
 			return false, fmt.Errorf("apply restore target %s: %w", file, err)
 		}
+		_ = os.Chmod(target, 0o600)
 	}
+	marker := appliedRestore{Items: make([]appliedItem, 0, len(replacements))}
 	for _, item := range replacements {
-		_ = os.RemoveAll(item.old)
+		marker.Items = append(marker.Items, appliedItem{Target: item.target, Old: item.old, HadOld: item.hadOld})
+	}
+	markerBytes, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		rollback()
+		return false, fmt.Errorf("encode restore marker: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, appliedRestoreFile), append(markerBytes, '\n'), 0o600); err != nil {
+		rollback()
+		return false, fmt.Errorf("write restore marker: %w", err)
 	}
 	_ = os.RemoveAll(filepath.Join(dataDir, "zajuna.db-wal"))
 	_ = os.RemoveAll(filepath.Join(dataDir, "zajuna.db-shm"))
@@ -396,6 +459,64 @@ func ApplyPending(dataDir string) (bool, error) {
 		return false, fmt.Errorf("remove pending restore: %w", err)
 	}
 	return true, nil
+}
+
+// RollbackApplied puts the previous live files back when sqlite.Open or
+// migration fails after a swap. The active database is restored from
+// `.restore-old` copies; nothing from the rejected backup remains in place.
+func RollbackApplied(dataDir string) error {
+	marker, err := readAppliedRestore(dataDir)
+	if err != nil {
+		return err
+	}
+	if marker == nil {
+		return nil
+	}
+	for index := len(marker.Items) - 1; index >= 0; index-- {
+		item := marker.Items[index]
+		_ = os.RemoveAll(item.Target)
+		if item.HadOld {
+			if err := os.Rename(item.Old, item.Target); err != nil {
+				return fmt.Errorf("rollback restore target: %w", err)
+			}
+		}
+	}
+	_ = os.Remove(filepath.Join(dataDir, appliedRestoreFile))
+	return nil
+}
+
+// CommitApplied drops the previous live copies after the restored database
+// opened and migrated successfully.
+func CommitApplied(dataDir string) error {
+	marker, err := readAppliedRestore(dataDir)
+	if err != nil {
+		return err
+	}
+	if marker == nil {
+		return nil
+	}
+	for _, item := range marker.Items {
+		_ = os.RemoveAll(item.Old)
+	}
+	if err := os.Remove(filepath.Join(dataDir, appliedRestoreFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("commit restore: %w", err)
+	}
+	return nil
+}
+
+func readAppliedRestore(dataDir string) (*appliedRestore, error) {
+	contents, err := os.ReadFile(filepath.Join(dataDir, appliedRestoreFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read restore marker: %w", err)
+	}
+	var marker appliedRestore
+	if err := json.Unmarshal(contents, &marker); err != nil {
+		return nil, fmt.Errorf("decode restore marker: %w", err)
+	}
+	return &marker, nil
 }
 
 func (m *Manager) resolvePath(name string) (string, error) {
@@ -441,6 +562,9 @@ func readManifest(files []*zip.File) (manifest, error) {
 func validateManifest(value manifest, files []*zip.File) (map[string]bool, error) {
 	if value.FormatVersion != "1" || !containsFile(value.Files, "database.sqlite") {
 		return nil, errors.New("el backup tiene un formato incompatible")
+	}
+	if value.SchemaVersion > sqlite.CurrentSchemaVersion() {
+		return nil, fmt.Errorf("el schema del backup (%d) es incompatible con esta versión (%d)", value.SchemaVersion, sqlite.CurrentSchemaVersion())
 	}
 	allowed := map[string]bool{"manifest.json": true}
 	for _, name := range value.Files {
@@ -500,6 +624,65 @@ func containsFile(files []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+func verifyStagedDatabase(dir string, value manifest) error {
+	if value.SchemaVersion > sqlite.CurrentSchemaVersion() {
+		return fmt.Errorf("el schema del backup (%d) es incompatible con esta versión (%d)", value.SchemaVersion, sqlite.CurrentSchemaVersion())
+	}
+	databasePath := filepath.Join(dir, "database.sqlite")
+	info, err := os.Lstat(databasePath)
+	if err != nil {
+		return fmt.Errorf("falta database.sqlite en el backup: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return errors.New("database.sqlite del backup no es un archivo regular")
+	}
+	if err := os.Chmod(databasePath, 0o600); err != nil && !errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("ajustar permisos de la base restaurada: %w", err)
+	}
+	if err := sqlite.ValidateRestoredDatabase(databasePath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func hashFiles(dir string, files []string) ([]fileDigest, error) {
+	result := make([]fileDigest, 0, len(files))
+	for _, name := range files {
+		if name == "manifest.json" {
+			continue
+		}
+		sum, err := fileSHA256(filepath.Join(dir, filepath.FromSlash(name)))
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, fileDigest{Name: name, SHA256: sum})
+	}
+	return result, nil
+}
+
+func hashMap(hashes []fileDigest) map[string]string {
+	result := make(map[string]string, len(hashes))
+	for _, item := range hashes {
+		if item.Name != "" {
+			result[item.Name] = item.SHA256
+		}
+	}
+	return result
+}
+
+func fileSHA256(path string) (string, error) {
+	input, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("hash backup file %s: %w", path, err)
+	}
+	defer input.Close()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, input); err != nil {
+		return "", fmt.Errorf("hash backup file %s: %w", path, err)
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func (m *Manager) copyOptionalData(workspace string, files *[]string) error {

@@ -245,6 +245,9 @@ func TestNotificationsAreExposedWithoutSensitiveJobMessages(t *testing.T) {
 	if err := store.CreateJob(context.Background(), jobs.Job{ID: "job-notification-api", Type: "sync-fichas", Status: jobs.StatusQueued, Input: []byte(`{}`), CreatedAt: now, UpdatedAt: now, MaxAttempts: 3}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.MarkRunning(context.Background(), "job-notification-api"); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.CompleteJob(context.Background(), "job-notification-api", []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}

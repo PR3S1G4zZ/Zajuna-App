@@ -12,7 +12,8 @@ import {
   useSyncFichas,
 } from '../hooks/api'
 import { formatDate } from '../lib/format'
-import { friendlyError, useToast } from '../hooks/useToast'
+import { useToast } from '../hooks/useToast'
+import { friendlyError } from '../lib/friendlyError'
 import type { Ficha } from '../types'
 import { RouteDiscoveryAction } from '../components/RouteDiscoveryAction'
 

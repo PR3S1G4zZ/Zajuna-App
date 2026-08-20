@@ -79,7 +79,17 @@ func main() {
 	}
 	localStore, err := sqlite.Open(dataDir)
 	if err != nil {
-		log.Fatalf("no se pudo abrir la base de datos local: %v", err)
+		if rbErr := backup.RollbackApplied(dataDir); rbErr != nil {
+			log.Fatalf("no se pudo abrir SQLite (%v) y el rollback falló (%v)", err, rbErr)
+		}
+		if retry, retryErr := sqlite.Open(dataDir); retryErr == nil {
+			log.Printf("restauración revertida porque SQLite no abrió; se conservó la base anterior")
+			localStore = retry
+		} else {
+			log.Fatalf("no se pudo abrir la base de datos local: %v", err)
+		}
+	} else if err := backup.CommitApplied(dataDir); err != nil {
+		log.Printf("la base restaurada abrió, pero no se pudo confirmar el restore: %v", err)
 	}
 	defer localStore.Close()
 	zajunaClient, err := zajuna.NewClient(zajuna.DefaultBaseURL)

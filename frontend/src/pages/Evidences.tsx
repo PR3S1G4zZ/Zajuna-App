@@ -10,7 +10,8 @@ import {
   useSetItemStatus,
   useUploadEvidence,
 } from '../hooks/api'
-import { friendlyError, useToast } from '../hooks/useToast'
+import { useToast } from '../hooks/useToast'
+import { friendlyError } from '../lib/friendlyError'
 import { confidenceFor, formatDate } from '../lib/format'
 import type { DashboardItem, Evidence, EvidenceGroup } from '../types'
 

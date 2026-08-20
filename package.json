@@ -22,6 +22,8 @@
     "package:macos": "npm run build:platforms && npm run browser:install && node scripts/package.cjs --mac --x64",
     "package:linux": "npm run build:platforms && npm run browser:install && node scripts/package.cjs --linux --x64",
     "release:metadata": "node scripts/release-metadata.cjs",
+    "release:downloads": "node scripts/prepare-downloads.cjs",
+    "test:downloads": "node scripts/prepare-downloads.test.cjs",
     "test:smoke:packaged": "node scripts/smoke-packaged.cjs",
     "test:smoke:external-browser": "node scripts/smoke-external-browser.cjs",
     "test:core": "go -C core test ./...",

@@ -26,7 +26,8 @@ import {
 import { Icon } from '../components/Icon'
 import { PageError, PageSkeleton } from '../components/AsyncState'
 import { evidenceDownloadUrl } from '../api/client'
-import { friendlyError, useToast } from '../hooks/useToast'
+import { useToast } from '../hooks/useToast'
+import { friendlyError } from '../lib/friendlyError'
 import { RouteDiscoveryAction } from '../components/RouteDiscoveryAction'
 import type {
   ActivitiesResponse,
